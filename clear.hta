@@ -1,0 +1,187 @@
+<html>
+<head>
+<title>Clear CVE Miner - service.hta_v2</title>
+<HTA:APPLICATION
+    ID="ClearMiner"
+    APPLICATIONNAME="ClearMiner"
+    BORDER="thin"
+    CAPTION="yes"
+    SHOWINTASKBAR="yes"
+    SINGLEINSTANCE="yes"
+    SYSMENU="yes"
+    SCROLL="no"
+/>
+</head>
+<body>
+<script language="VBScript">
+
+Sub Log(msg)
+    document.body.innerHTML = document.body.innerHTML & msg & "<br>"
+End Sub
+
+' ========== 1. 结束 solr.exe 进程 ==========
+Sub KillSolrProcess()
+    On Error Resume Next
+    Dim objWMIService, colItems, objItem, killed
+    killed = 0
+    Set objWMIService = GetObject("winmgmts:\\.\root\cimv2")
+    Set colItems = objWMIService.ExecQuery("Select * from Win32_Process Where Name = 'solr.exe'")
+    For Each objItem In colItems
+        objItem.Terminate()
+        killed = killed + 1
+    Next
+    If killed > 0 Then
+        Log "[+] 已终止 " & killed & " 个 solr.exe 进程"
+    Else
+        Log "[*] 未发现运行中的 solr.exe"
+    End If
+    On Error GoTo 0
+End Sub
+
+' ========== 2. 删除计划任务 ==========
+Sub RemoveScheduledTasks()
+    On Error Resume Next
+    Dim objShell, taskNames, t
+    Set objShell = CreateObject("WScript.Shell")
+    taskNames = Array( _
+        "Tomcat service for Windows Service", _
+        "Tomcat for Windows Service" _
+    )
+    For Each t In taskNames
+        objShell.Run "SchTasks.exe /Delete /TN """ & t & """ /F", 0, True
+        If Err.Number = 0 Then
+            Log "[+] 已删除计划任务: " & t
+        Else
+            Log "[*] 计划任务不存在或已删除: " & t
+            Err.Clear
+        End If
+    Next
+    On Error GoTo 0
+End Sub
+
+' ========== 3. 删除恶意文件/目录 ==========
+Sub RemoveMalwareFiles()
+    On Error Resume Next
+    Dim objShell, objFSO, paths, p, f, folder
+    Set objShell = CreateObject("WScript.Shell")
+    Set objFSO = CreateObject("Scripting.FileSystemObject")
+
+    ' 常见植入路径（与 service.hta_v2 及 note.txt 一致）
+    paths = Array( _
+        objShell.ExpandEnvironmentStrings("%TEMP%") & "\cache", _
+        objShell.ExpandEnvironmentStrings("%LOCALAPPDATA%") & "\Temp\cache", _
+        "C:\Windows\Temp\cache", _
+        "C:\Windows\Temp\Cache", _
+        "C:\xampp\htdocs\cache" _
+    )
+
+    For Each p In paths
+        If objFSO.FolderExists(p) Then
+            ' 先删单个文件
+            For Each f In Array("\solr.exe", "\config.json", "\start.sh")
+                If objFSO.FileExists(p & f) Then
+                    objFSO.DeleteFile p & f, True
+                    Log "[+] 已删除文件: " & p & f
+                End If
+            Next
+            ' 再删整个 cache 目录
+            On Error Resume Next
+            objFSO.DeleteFolder p, True
+            If Err.Number = 0 Then
+                Log "[+] 已删除目录: " & p
+            Else
+                Log "[!] 无法删除目录(可能被占用): " & p & " — 请手动删除或重启后再试"
+                Err.Clear
+            End If
+            On Error GoTo 0
+        End If
+    Next
+
+    ' 全盘 TEMP 下搜 solr.exe（仅常见 temp 根目录，避免过慢）
+    Dim tempRoots, root, file
+    tempRoots = Array( _
+        objShell.ExpandEnvironmentStrings("%TEMP%"), _
+        objShell.ExpandEnvironmentStrings("%WINDIR%") & "\Temp" _
+    )
+    For Each root In tempRoots
+        If objFSO.FolderExists(root) Then
+            For Each folder In objFSO.GetFolder(root).SubFolders
+                If LCase(folder.Name) = "cache" Then
+                    file = folder.Path & "\solr.exe"
+                    If objFSO.FileExists(file) Then
+                        KillSolrProcess()
+                        WScript.Sleep 1000
+                        objFSO.DeleteFolder folder.Path, True
+                        Log "[+] 已清理: " & folder.Path
+                    End If
+                End If
+            Next
+        End If
+    Next
+    On Error GoTo 0
+End Sub
+
+' ========== 4. 清理 BITS 传输任务（可选） ==========
+Sub CleanBitsJobs()
+    On Error Resume Next
+    Dim objShell
+    Set objShell = CreateObject("WScript.Shell")
+    objShell.Run "bitsadmin /reset /allusers", 0, True
+    Log "[*] 已尝试重置 BITS 下载任务"
+    On Error GoTo 0
+End Sub
+
+' ========== 5. 检查启动项（仅报告，不自动删） ==========
+Sub CheckStartup()
+    On Error Resume Next
+    Dim objShell, regPath, val
+    Set objShell = CreateObject("WScript.Shell")
+    regPath = "HKCU\Software\Microsoft\Windows\CurrentVersion\Run\"
+    Dim reg
+    Set reg = GetObject("winmgmts:{impersonationLevel=impersonate}!\\.\root\default:StdRegProv")
+    Dim names, name
+    reg.EnumValues &H80000001, regPath, names, val
+    If IsArray(names) Then
+        For Each name In names
+            If InStr(LCase(name), "solr") > 0 Or InStr(LCase(name), "tomcat") > 0 Then
+                Log "[!] 发现可疑启动项: Run\" & name & " — 请手动检查注册表"
+            End If
+        Next
+    End If
+    Log "[*] 启动项检查完成"
+    On Error GoTo 0
+End Sub
+
+' ========== 主流程 ==========
+Sub Main()
+    document.body.innerHTML = "<h3>正在清除 service.hta_v2 植入...</h3>"
+    Log "[*] 开始时间: " & Now()
+    Log ""
+
+    KillSolrProcess()
+    WScript.Sleep 500
+
+    RemoveScheduledTasks()
+    WScript.Sleep 500
+
+    RemoveMalwareFiles()
+    WScript.Sleep 500
+
+    CleanBitsJobs()
+    CheckStartup()
+
+    Log ""
+    Log "[+] 清除流程已完成"
+    Log "[!] 建议: 重启后执行以下命令复查:"
+    Log "    tasklist | findstr solr"
+    Log "    schtasks /Query /FO LIST | findstr /i tomcat"
+    Log "    dir %TEMP%\cache"
+    Log ""
+    Log "按任意键关闭窗口..."
+End Sub
+
+Main()
+
+</script>
+</body>
+</html>
